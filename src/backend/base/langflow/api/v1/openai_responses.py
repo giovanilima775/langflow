@@ -329,6 +329,7 @@ async def run_flow_for_openai_responses(
         stream=False,
         api_key_user=api_key_user,
         context=context,
+        endpoint_type="api",
     )
 
     # Extract output text and tool calls from result

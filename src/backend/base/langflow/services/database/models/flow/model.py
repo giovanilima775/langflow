@@ -17,6 +17,9 @@ from sqlmodel import JSON, Column, Field, Relationship, SQLModel
 
 from langflow.schema.data import Data
 
+if TYPE_CHECKING:  # pragma: no cover
+    from langflow.services.database.models.flow.version_models import FlowVersion
+
 if TYPE_CHECKING:
     from langflow.services.database.models.folder.model import Folder
     from langflow.services.database.models.user.model import User
@@ -194,6 +197,14 @@ class Flow(FlowBase, table=True):  # type: ignore[call-arg]
     folder_id: UUID | None = Field(default=None, foreign_key="folder.id", nullable=True, index=True)
     fs_path: str | None = Field(default=None, nullable=True)
     folder: Optional["Folder"] = Relationship(back_populates="flows")
+    is_draft: bool = Field(default=True, nullable=False)
+    active_version_id: UUID | None = Field(default=None, foreign_key="flow_version.id", nullable=True)
+    version_count: int = Field(default=0, nullable=False)
+    last_published_at: datetime | None = Field(default=None, nullable=True)
+    versions: list["FlowVersion"] = Relationship(back_populates="flow")
+    active_version: Optional["FlowVersion"] = Relationship(
+        sa_relationship_kwargs={"primaryjoin": "Flow.active_version_id==FlowVersion.id"}
+    )
 
     def to_data(self):
         serialized = self.model_dump()
@@ -216,6 +227,10 @@ class FlowCreate(FlowBase):
     user_id: UUID | None = None
     folder_id: UUID | None = None
     fs_path: str | None = None
+    is_draft: bool = True
+    active_version_id: UUID | None = None
+    version_count: int = 0
+    last_published_at: datetime | None = None
 
 
 class FlowRead(FlowBase):
@@ -223,6 +238,10 @@ class FlowRead(FlowBase):
     user_id: UUID | None = Field()
     folder_id: UUID | None = Field()
     tags: list[str] | None = Field(None, description="The tags of the flow")
+    is_draft: bool = True
+    active_version_id: UUID | None = None
+    version_count: int = 0
+    last_published_at: datetime | None = None
 
 
 class FlowHeader(BaseModel):
@@ -264,6 +283,10 @@ class FlowUpdate(SQLModel):
     action_description: str | None = None
     access_type: AccessTypeEnum | None = None
     fs_path: str | None = None
+    is_draft: bool | None = None
+    active_version_id: UUID | None = None
+    version_count: int | None = None
+    last_published_at: datetime | None = None
 
     @field_validator("endpoint_name")
     @classmethod

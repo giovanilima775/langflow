@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
@@ -10,7 +12,9 @@ from sqlmodel import select
 
 from langflow.schema.schema import INPUT_FIELD_NAME
 from langflow.services.database.models.flow.model import Flow, FlowRead
-from langflow.services.deps import get_settings_service, session_scope
+from langflow.services.database.models.flow.version_models import FlowVersionRead
+from langflow.services.deps import get_settings_service, get_version_service, session_scope
+from langflow.services.version.exceptions import VersionNotFoundError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -277,14 +281,22 @@ def get_arg_names(inputs: list[Vertex]) -> list[dict[str, str]]:
     ]
 
 
-async def get_flow_by_id_or_endpoint_name(flow_id_or_name: str, user_id: str | UUID | None = None) -> FlowRead | None:
+async def get_flow_by_id_or_endpoint_name(
+    flow_id_or_name: str, user_id: str | UUID | None = None
+) -> FlowRead | FlowVersionRead | None:
+    version_identifier: str | None = None
+    base_identifier = flow_id_or_name
+    if "@" in flow_id_or_name:
+        base_identifier, version_identifier = flow_id_or_name.split("@", 1)
+        base_identifier = base_identifier or flow_id_or_name
+
     async with session_scope() as session:
         endpoint_name = None
         try:
-            flow_id = UUID(flow_id_or_name)
+            flow_id = UUID(base_identifier)
             flow = await session.get(Flow, flow_id)
         except ValueError:
-            endpoint_name = flow_id_or_name
+            endpoint_name = base_identifier
             stmt = select(Flow).where(Flow.endpoint_name == endpoint_name)
             if user_id:
                 uuid_user_id = UUID(user_id) if isinstance(user_id, str) else user_id
@@ -292,7 +304,22 @@ async def get_flow_by_id_or_endpoint_name(flow_id_or_name: str, user_id: str | U
             flow = (await session.exec(stmt)).first()
         if flow is None:
             raise HTTPException(status_code=404, detail=f"Flow identifier {flow_id_or_name} not found")
-        return FlowRead.model_validate(flow, from_attributes=True)
+
+    flow_read = FlowRead.model_validate(flow, from_attributes=True)
+    version_service = get_version_service()
+
+    if version_identifier:
+        try:
+            return await version_service.get_version(flow.id, version_identifier)
+        except VersionNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if flow.active_version_id:
+        active_version = await version_service.get_active_version(flow.id)
+        if active_version:
+            return active_version
+
+    return flow_read
 
 
 async def generate_unique_flow_name(flow_name, user_id, session):

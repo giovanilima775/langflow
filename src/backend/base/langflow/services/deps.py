@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from langflow.services.telemetry.service import TelemetryService
     from langflow.services.tracing.service import TracingService
     from langflow.services.variable.service import VariableService
+    from langflow.services.version.service import VersionService
 
 
 def get_service(service_type: ServiceType, default=None):
@@ -106,6 +107,14 @@ def get_variable_service() -> VariableService:
     from langflow.services.variable.factory import VariableServiceFactory
 
     return get_service(ServiceType.VARIABLE_SERVICE, VariableServiceFactory())
+
+
+def get_version_service() -> VersionService:
+    """Retrieve the version management service."""
+
+    from langflow.services.version.service import VersionService
+
+    return VersionService()
 
 
 def get_settings_service() -> SettingsService:

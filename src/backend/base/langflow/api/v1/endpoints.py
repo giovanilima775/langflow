@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
@@ -46,9 +47,15 @@ from langflow.schema.graph import Tweaks
 from langflow.services.auth.utils import api_key_security, get_current_active_user, get_webhook_user
 from langflow.services.cache.utils import save_uploaded_file
 from langflow.services.database.models.flow.model import Flow, FlowRead
+from langflow.services.database.models.flow.version_models import FlowVersionRead
 from langflow.services.database.models.flow.utils import get_all_webhook_components_in_flow
 from langflow.services.database.models.user.model import User, UserRead
-from langflow.services.deps import get_session_service, get_settings_service, get_telemetry_service
+from langflow.services.deps import (
+    get_session_service,
+    get_settings_service,
+    get_telemetry_service,
+    get_version_service,
+)
 from langflow.services.telemetry.schema import RunPayload
 from langflow.utils.compression import compress_response
 from langflow.utils.version import get_version_info
@@ -109,23 +116,34 @@ def validate_input_and_tweaks(input_request: SimplifiedAPIRequest) -> None:
 
 
 async def simple_run_flow(
-    flow: Flow,
+    flow: Flow | FlowRead | FlowVersionRead,
     input_request: SimplifiedAPIRequest,
     *,
     stream: bool = False,
     api_key_user: User | None = None,
     event_manager: EventManager | None = None,
     context: dict | None = None,
+    endpoint_type: str = "api",
 ):
     validate_input_and_tweaks(input_request)
+    version_service = get_version_service()
+    start_time = time.perf_counter()
+    task_result: list[RunOutputs] = []
+    user_id = api_key_user.id if api_key_user else None
+    version_id: UUID | None = None
+    execution_success = False
     try:
-        task_result: list[RunOutputs] = []
-        user_id = api_key_user.id if api_key_user else None
-        flow_id_str = str(flow.id)
+        flow_identifier = getattr(flow, "flow_id", getattr(flow, "id", None))
+        if flow_identifier is None:
+            msg = "Flow identifier could not be resolved"
+            raise ValueError(msg)
+        if isinstance(flow, FlowVersionRead):
+            version_id = flow.id
+        flow_id_str = str(flow_identifier)
         if flow.data is None:
             msg = f"Flow {flow_id_str} has no data"
             raise ValueError(msg)
-        graph_data = flow.data.copy()
+        graph_data = json.loads(json.dumps(flow.data))
         graph_data = process_tweaks(graph_data, input_request.tweaks or {}, stream=stream)
         graph = Graph.from_payload(
             graph_data, flow_id=flow_id_str, user_id=str(user_id), flow_name=flow.name, context=context
@@ -161,19 +179,30 @@ async def simple_run_flow(
             event_manager=event_manager,
         )
 
+        execution_success = True
         return RunResponse(outputs=task_result, session_id=session_id)
 
     except sa.exc.StatementError as exc:
         raise ValueError(str(exc)) from exc
+    finally:
+        if version_id is not None:
+            duration_ms = int((time.perf_counter() - start_time) * 1000)
+            await version_service.record_execution_metrics(
+                version_id,
+                duration_ms,
+                success=execution_success,
+                endpoint_type=endpoint_type,
+            )
 
 
 async def simple_run_flow_task(
-    flow: Flow,
+    flow: Flow | FlowRead | FlowVersionRead,
     input_request: SimplifiedAPIRequest,
     *,
     stream: bool = False,
     api_key_user: User | None = None,
     event_manager: EventManager | None = None,
+    endpoint_type: str = "api",
 ):
     """Run a flow task as a BackgroundTask, therefore it should not throw exceptions."""
     try:
@@ -183,6 +212,7 @@ async def simple_run_flow_task(
             stream=stream,
             api_key_user=api_key_user,
             event_manager=event_manager,
+            endpoint_type=endpoint_type,
         )
 
     except Exception:  # noqa: BLE001
@@ -225,7 +255,7 @@ async def consume_and_yield(queue: asyncio.Queue, client_consumed_queue: asyncio
 
 
 async def run_flow_generator(
-    flow: Flow,
+    flow: Flow | FlowRead | FlowVersionRead,
     input_request: SimplifiedAPIRequest,
     api_key_user: User | None,
     event_manager: EventManager,
@@ -265,6 +295,7 @@ async def run_flow_generator(
             api_key_user=api_key_user,
             event_manager=event_manager,
             context=context,
+            endpoint_type="api",
         )
         event_manager.on_end(data={"result": result.model_dump()})
         await client_consumed_queue.get()
@@ -279,7 +310,7 @@ async def run_flow_generator(
 async def simplified_run_flow(
     *,
     background_tasks: BackgroundTasks,
-    flow: Annotated[FlowRead | None, Depends(get_flow_by_id_or_endpoint_name)],
+    flow: Annotated[FlowRead | FlowVersionRead | None, Depends(get_flow_by_id_or_endpoint_name)],
     input_request: SimplifiedAPIRequest | None = None,
     stream: bool = False,
     api_key_user: Annotated[UserRead, Depends(api_key_security)],
@@ -351,6 +382,7 @@ async def simplified_run_flow(
             input_request=input_request,
             stream=stream,
             api_key_user=api_key_user,
+            endpoint_type="api",
         )
         end_time = time.perf_counter()
         background_tasks.add_task(
@@ -399,7 +431,7 @@ async def simplified_run_flow(
 @router.post("/webhook/{flow_id_or_name}", response_model=dict, status_code=HTTPStatus.ACCEPTED)  # noqa: RUF100, FAST003
 async def webhook_run_flow(
     flow_id_or_name: str,
-    flow: Annotated[Flow, Depends(get_flow_by_id_or_endpoint_name)],
+    flow: Annotated[Flow | FlowVersionRead, Depends(get_flow_by_id_or_endpoint_name)],
     request: Request,
     background_tasks: BackgroundTasks,
 ):
@@ -457,6 +489,7 @@ async def webhook_run_flow(
                 flow=flow,
                 input_request=input_request,
                 api_key_user=webhook_user,
+                endpoint_type="webhook",
             )
         except Exception as exc:
             error_msg = str(exc)
