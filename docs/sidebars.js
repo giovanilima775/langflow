@@ -46,6 +46,11 @@ module.exports = {
           label: "Build flows"
         },
         {
+          type: "doc",
+          id: "flow-versioning",
+          label: "Flow versioning system"
+        },
+        {
           type: "category",
           label: "Run flows",
           items: [
